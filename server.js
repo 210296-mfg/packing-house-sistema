@@ -34,11 +34,6 @@ app.delete('/api/admin/delete-import',auth,roles('admin'),(req,res)=>{
     res.status(500).json({error:'Erro ao apagar importações: '+e.message});
   }
 });
-  }catch(e){
-    res.status(500).json({error:'Erro ao apagar importação: '+e.message});
-  }
-});
-
 app.get('/api/settings',auth,(req,res)=>{const get=k=>Number(db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value);res.json({payment_threshold:Number.isFinite(get('payment_threshold'))?get('payment_threshold'):90,cat_error_limit:Number.isFinite(get('cat_error_limit'))?get('cat_error_limit'):10,industry_error_limit:Number.isFinite(get('industry_error_limit'))?get('industry_error_limit'):6});});
 app.put('/api/settings',auth,roles('admin','gerente'),(req,res)=>{const n=Number(req.body.payment_threshold),cat=Number(req.body.cat_error_limit),ind=Number(req.body.industry_error_limit);if(!Number.isFinite(n)||n<0||!Number.isFinite(cat)||cat<0||!Number.isFinite(ind)||ind<0)return res.status(400).json({error:'Parâmetros inválidos'});const up=db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");up.run('payment_threshold',String(n));up.run('cat_error_limit',String(cat));up.run('industry_error_limit',String(ind));res.json({payment_threshold:n,cat_error_limit:cat,industry_error_limit:ind});});
 if(!db.prepare("SELECT 1 FROM settings WHERE key='payment_threshold'").get()) db.prepare("INSERT INTO settings(key,value) VALUES('payment_threshold','90')").run();
