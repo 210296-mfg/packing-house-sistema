@@ -1,4 +1,4 @@
-const express=require('express');const path=require('path');const fs=require('fs');const Database=require('better-sqlite3');const bcrypt=require('bcryptjs');const jwt=require('jsonwebtoken');const multer=require('multer');const XLSX=require('xlsx');
+const express=require('express');const path=require('path');const fs=require('fs');const Database=require('better-sqlite3');const bcrypt=require('bcryptjs');const jwt=require('jsonwebtoken');const multer=require('multer');const XLSX=require('xlsx');const Tesseract=require('tesseract.js');
 const app=express();const db=new Database(path.join(__dirname,'packing.db'));const JWT_SECRET=process.env.JWT_SECRET||'TROQUE-ESTA-CHAVE-EM-PRODUCAO';
 app.use(express.json());app.use(express.static(path.join(__dirname,'public')));
 const upload=multer({dest:path.join(__dirname,'uploads'),limits:{fileSize:10*1024*1024}});
@@ -51,8 +51,162 @@ app.post('/api/workers',auth,roles('admin','gerente','supervisor'),(req,res)=>{t
 app.put('/api/workers/:id',auth,roles('admin','gerente','supervisor'),(req,res)=>{db.prepare('UPDATE workers SET name=?,code=?,rate=?,active=? WHERE id=?').run(req.body.name,req.body.code,Number(req.body.rate||0),req.body.active?1:0,req.params.id);res.json({ok:true})});
 app.get('/api/users',auth,roles('admin'),(req,res)=>res.json(db.prepare('SELECT id,name,username,role,active,created_at FROM users ORDER BY name').all()));
 app.post('/api/users',auth,roles('admin'),(req,res)=>{try{const p=bcrypt.hashSync(req.body.password,10);const r=db.prepare('INSERT INTO users(name,username,password,role) VALUES(?,?,?,?)').run(req.body.name,req.body.username,p,req.body.role);res.json({id:r.lastInsertRowid})}catch(e){res.status(400).json({error:'Usuário já existe ou dados inválidos'})}});
-app.get('/api/production',auth,(req,res)=>{const {from,to,worker}=req.query;let q=`SELECT p.*,w.name worker_name,w.code,w.rate,CASE WHEN p.cat1<=10 AND p.cat3<=10 AND p.industry<6 THEN MAX(p.boxes-?,0)*0.25 ELSE 0 END payment,CASE WHEN p.cat1>${catLimit} THEN 'Não paga: CAT 1 acima de '+${catLimit}+'%' WHEN p.cat3>${catLimit} THEN 'Não paga: CAT 3 acima de '+${catLimit}+'%' WHEN p.industry>=${indLimit} THEN 'Não paga: Indústria em '+${indLimit}+'% ou mais' ELSE 'Elegível para pagamento' END payment_reason FROM production p JOIN workers w ON w.id=p.worker_id WHERE 1=1`;const a=[];if(from){q+=' AND p.date>=?';a.push(from)}if(to){q+=' AND p.date<=?';a.push(to)}if(worker){q+=' AND p.worker_id=?';a.push(worker)}q+=' ORDER BY p.date DESC,p.id DESC';const threshold=Number(db.prepare("SELECT value FROM settings WHERE key='payment_threshold'").get()?.value||90);const catLimit=Number(db.prepare("SELECT value FROM settings WHERE key='cat_error_limit'").get()?.value||10);const indLimit=Number(db.prepare("SELECT value FROM settings WHERE key='industry_error_limit'").get()?.value||6);q=q.replaceAll('p.cat1<=10','p.cat1<=?').replaceAll('p.cat3<=10','p.cat3<=?').replaceAll('p.industry<6','p.industry<?').replaceAll('p.cat1>10','p.cat1>?').replaceAll('p.cat3>10','p.cat3>?').replaceAll('p.industry>=6','p.industry>=?');res.json(db.prepare(q).all(threshold,catLimit,catLimit,indLimit,catLimit,catLimit,indLimit,...a))});
+app.get('/api/production',auth,(req,res)=>{const {from,to,worker}=req.query;let q=`SELECT p.*,w.name worker_name,w.code,w.rate,CASE WHEN p.cat1<=10 AND p.cat3<=10 AND p.industry<6 THEN COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25 ELSE 0 END payment,CASE WHEN p.cat1>${catLimit} THEN 'Não paga: CAT 1 acima de '+${catLimit}+'%' WHEN p.cat3>${catLimit} THEN 'Não paga: CAT 3 acima de '+${catLimit}+'%' WHEN p.industry>=${indLimit} THEN 'Não paga: Indústria em '+${indLimit}+'% ou mais' ELSE 'Elegível para pagamento' END payment_reason FROM production p JOIN workers w ON w.id=p.worker_id WHERE 1=1`;const a=[];if(from){q+=' AND p.date>=?';a.push(from)}if(to){q+=' AND p.date<=?';a.push(to)}if(worker){q+=' AND p.worker_id=?';a.push(worker)}q+=' ORDER BY p.date DESC,p.id DESC';const threshold=Number(db.prepare("SELECT value FROM settings WHERE key='payment_threshold'").get()?.value||90);const catLimit=Number(db.prepare("SELECT value FROM settings WHERE key='cat_error_limit'").get()?.value||10);const indLimit=Number(db.prepare("SELECT value FROM settings WHERE key='industry_error_limit'").get()?.value||6);q=q.replaceAll('p.cat1<=10','p.cat1<=?').replaceAll('p.cat3<=10','p.cat3<=?').replaceAll('p.industry<6','p.industry<?').replaceAll('p.cat1>10','p.cat1>?').replaceAll('p.cat3>10','p.cat3>?').replaceAll('p.industry>=6','p.industry>=?');res.json(db.prepare(q).all(threshold,catLimit,catLimit,indLimit,catLimit,catLimit,indLimit,...a))});
 app.post('/api/production',auth,roles('admin','gerente','supervisor','cq','embaladora'),(req,res)=>{const boxes=Number(req.body.boxes||0),cat1=Number(req.body.cat1||0),cat3=Number(req.body.cat3||0),industry=Number(req.body.industry||0);const threshold=Number(db.prepare("SELECT value FROM settings WHERE key='payment_threshold'").get()?.value||90);const excess=Math.max(boxes-threshold,0);const r=db.prepare('INSERT INTO production(worker_id,date,boxes,cat1,cat3,industry,excess90,notes,created_by,source_value,source_note) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(req.body.worker_id,req.body.date,boxes,cat1,cat3,industry,excess,req.body.notes||'',req.user.id,null,'manual');res.json({id:r.lastInsertRowid,payment_eligible:payEligible(cat1,cat3,industry),payment_reason:paymentReason(cat1,cat3,industry)})});
+
+app.post('/api/ocr-production',auth,roles('admin','gerente','supervisor','cq'),upload.single('file'),async(req,res)=>{
+  if(!req.file)return res.status(400).json({error:'Imagem não enviada'});
+
+  try{
+    const result=await Tesseract.recognize(
+      req.file.path,
+      'por',
+      {
+        logger:m=>{
+          if(m.status==='recognizing text' && m.progress){
+            console.log('OCR:',Math.round(m.progress*100)+'%');
+          }
+        }
+      }
+    );
+
+    const text=result.data.text||'';
+
+
+    
+    res.json({
+      ok:true,
+      text
+    });
+
+  }catch(e){
+    res.status(400).json({
+      error:'Falha no OCR: '+e.message
+    });
+  }finally{
+    try{fs.unlinkSync(req.file.path)}catch{}
+  }
+});
+
+
+app.post('/api/import-image-production',auth,roles('admin','gerente','supervisor','cq'),upload.single('file'),async(req,res)=>{
+  if(!req.file)return res.status(400).json({error:'Imagem não enviada'});
+
+  try{
+    const result=await Tesseract.recognize(
+      req.file.path,
+      'por',
+      {
+        logger:m=>{
+          if(m.status==='recognizing text' && m.progress){
+            console.log('OCR:',Math.round(m.progress*100)+'%');
+          }
+        }
+      }
+    );
+
+    const text=result.data.text||'';
+    const rows=parseOCRProduction(text);
+
+    if(!rows.length){
+      return res.status(400).json({
+        error:'Nenhum registro de produção foi identificado na imagem.',
+        ocr_text:text
+      });
+    }
+
+    const insWorker=db.prepare(
+      'INSERT OR IGNORE INTO workers(name,code,rate) VALUES(?,?,?)'
+    );
+
+    const getWorker=db.prepare(
+      'SELECT id FROM workers WHERE lower(name)=lower(?) LIMIT 1'
+    );
+
+    const insProd=db.prepare(`
+      INSERT INTO production(
+        worker_id,date,boxes,cat1,cat3,industry,
+        excess90,notes,created_by,source_value,source_note
+      )
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)
+    `);
+
+    const threshold=Number(
+      db.prepare(
+        "SELECT value FROM settings WHERE key='payment_threshold'"
+      ).get()?.value || 90
+    );
+
+    let imported=0;
+    let createdWorkers=0;
+
+    const tx=db.transaction(()=>{
+      for(const row of rows){
+
+        if(!row.date || !row.name || !row.boxes) continue;
+
+        let w=getWorker.get(row.name);
+
+        if(!w){
+          const code='OCR-'+slug(row.name).slice(0,20)+'-'+
+            Math.random().toString(36).slice(2,6);
+
+          insWorker.run(row.name,code,0);
+          w=getWorker.get(row.name);
+          createdWorkers++;
+        }
+
+        const excess=Math.max(
+          Number(row.boxes)-threshold,
+          0
+        );
+
+        const sourceValue=
+          row.source_value!==null &&
+          Number.isFinite(Number(row.source_value))
+            ? Number(row.source_value)
+            : null;
+
+        insProd.run(
+          w.id,
+          row.date,
+          Number(row.boxes),
+          Number(row.cat1||0),
+          Number(row.cat3||0),
+          Number(row.industry||0),
+          excess,
+          'Importado por imagem/OCR',
+          req.user.id,
+          sourceValue,
+          'Importado por imagem/OCR'
+        );
+
+        imported++;
+      }
+    });
+
+    tx();
+
+    res.json({
+      ok:true,
+      imported,
+      createdWorkers,
+      rows,
+      ocr_text:text
+    });
+
+  }catch(e){
+    console.error(e);
+
+    res.status(400).json({
+      error:'Falha ao importar imagem: '+e.message
+    });
+
+  }finally{
+    try{fs.unlinkSync(req.file.path)}catch{}
+  }
+});
+
 app.post('/api/import-production',auth,roles('admin','gerente','supervisor','cq'),upload.single('file'),(req,res)=>{
   if(!req.file)return res.status(400).json({error:'Arquivo não enviado'});
   let imported=0,skipped=0,createdWorkers=0; const errors=[];
@@ -99,6 +253,52 @@ function money(v){if(v===null||v===undefined||v==='')return null;const n=num(v);
 function parseDate(s){const m=s.match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})/);if(!m)return null;let y=Number(m[3]);if(y<100)y+=2000;return new Date(y,Number(m[2])-1,Number(m[1]))}
 function dateISO(d){if(!d)return null;return d.toISOString().slice(0,10)}
 function slug(s){return s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9]+/g,'-').toUpperCase()}
+
+app.put('/api/production/:id',auth,roles('admin','gerente','supervisor'),(req,res)=>{
+  try{
+    const boxes=Number(req.body.boxes||0);
+    const cat1=Number(req.body.cat1||0);
+    const cat3=Number(req.body.cat3||0);
+    const industry=Number(req.body.industry||0);
+
+    const threshold=Number(
+      db.prepare("SELECT value FROM settings WHERE key='payment_threshold'")
+        .get()?.value || 90
+    );
+
+    const excess=Math.max(boxes-threshold,0);
+
+    db.prepare(`
+      UPDATE production
+      SET worker_id=?,
+          date=?,
+          boxes=?,
+          cat1=?,
+          cat3=?,
+          industry=?,
+          excess90=?,
+          notes=?
+      WHERE id=?
+    `).run(
+      req.body.worker_id,
+      req.body.date,
+      boxes,
+      cat1,
+      cat3,
+      industry,
+      excess,
+      req.body.notes||'',
+      req.params.id
+    );
+
+    res.json({ok:true});
+  }catch(e){
+    res.status(400).json({
+      error:'Erro ao editar produção: '+e.message
+    });
+  }
+});
+
 app.delete('/api/production/:id',auth,roles('admin','gerente'),(req,res)=>{db.prepare('DELETE FROM production WHERE id=?').run(req.params.id);res.json({ok:true})});
 // Normaliza registros antigos importados que armazenavam percentuais como fração (0,08 -> 8).
 db.prepare("UPDATE production SET cat1=cat1*100 WHERE source_note LIKE 'valor da planilha' AND cat1>0 AND cat1<=1").run(); db.prepare("UPDATE production SET cat3=cat3*100 WHERE source_note LIKE 'valor da planilha' AND cat3>0 AND cat3<=1").run(); db.prepare("UPDATE production SET industry=industry*100 WHERE source_note LIKE 'valor da planilha' AND industry>0 AND industry<=1").run();
@@ -110,10 +310,10 @@ app.get('/api/dashboard',auth,(req,res)=>{
   const wsql=where.length?' WHERE '+where.join(' AND '):'';
   const threshold=Number(db.prepare("SELECT value FROM settings WHERE key='payment_threshold'").get()?.value||90);
   const catLimit=Number(db.prepare("SELECT value FROM settings WHERE key='cat_error_limit'").get()?.value||10); const indLimit=Number(db.prepare("SELECT value FROM settings WHERE key='industry_error_limit'").get()?.value||6); const eligible=`(p.cat1<=${catLimit} AND p.cat3<=${catLimit} AND p.industry<${indLimit})`;
-  const summary=db.prepare(`SELECT COUNT(*) records,COALESCE(SUM(p.boxes),0) boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN MAX(p.boxes-?,0)*0.25 ELSE 0 END),0) payment,COUNT(DISTINCT p.worker_id) workers,COALESCE(SUM(MAX(p.boxes-?,0)),0) excess_boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN 0 ELSE 1 END),0) nonpay_records FROM production p JOIN workers w ON w.id=p.worker_id${wsql}`).get(threshold,threshold,...args);
-  const top=db.prepare(`SELECT w.name,w.code,COALESCE(SUM(p.boxes),0) boxes,COALESCE(SUM(MAX(p.boxes-?,0)),0) excess_boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN MAX(p.boxes-?,0)*0.25 ELSE 0 END),0) payment,COALESCE(SUM(CASE WHEN ${eligible} THEN 0 ELSE 1 END),0) nonpay_records FROM workers w LEFT JOIN production p ON p.worker_id=w.id${where.length?' AND '+where.join(' AND '):''} GROUP BY w.id ORDER BY boxes DESC LIMIT 20`).all(threshold,threshold,...args);
-  const daily=db.prepare(`SELECT p.date,COUNT(*) records,COUNT(DISTINCT p.worker_id) workers,COALESCE(SUM(p.boxes),0) boxes,COALESCE(SUM(MAX(p.boxes-?,0)),0) excess_boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN MAX(p.boxes-?,0)*0.25 ELSE 0 END),0) payment,COALESCE(SUM(CASE WHEN ${eligible} THEN 0 ELSE 1 END),0) nonpay_records FROM production p JOIN workers w ON w.id=p.worker_id${wsql} GROUP BY p.date ORDER BY p.date DESC`).all(threshold,threshold,...args);
-  const details=db.prepare(`SELECT p.date,w.name,w.code,p.boxes,MAX(p.boxes-?,0) excess_boxes,CASE WHEN ${eligible} THEN MAX(p.boxes-?,0)*0.25 ELSE 0 END payment,CASE WHEN p.cat1>${catLimit} THEN 'Não paga: CAT 1 acima de '+${catLimit}+'%' WHEN p.cat3>${catLimit} THEN 'Não paga: CAT 3 acima de '+${catLimit}+'%' WHEN p.industry>=${indLimit} THEN 'Não paga: Indústria em '+${indLimit}+'% ou mais' ELSE 'Elegível para pagamento' END payment_reason FROM production p JOIN workers w ON w.id=p.worker_id${wsql} ORDER BY p.date DESC,p.id DESC LIMIT 500`).all(threshold,threshold,...args);
+  const summary=db.prepare(`SELECT COUNT(*) records,COALESCE(SUM(p.boxes),0) boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25 ELSE 0 END),0) payment,COUNT(DISTINCT p.worker_id) workers,COALESCE(SUM(MAX(p.boxes-?,0)),0) excess_boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN 0 ELSE 1 END),0) nonpay_records FROM production p JOIN workers w ON w.id=p.worker_id${wsql}`).get(threshold,threshold,...args);
+  const top=db.prepare(`SELECT w.name,w.code,COALESCE(SUM(p.boxes),0) boxes,COALESCE(SUM(MAX(p.boxes-?,0)),0) excess_boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25 ELSE 0 END),0) payment,COALESCE(SUM(CASE WHEN ${eligible} THEN 0 ELSE 1 END),0) nonpay_records FROM workers w LEFT JOIN production p ON p.worker_id=w.id${where.length?' AND '+where.join(' AND '):''} GROUP BY w.id ORDER BY boxes DESC LIMIT 20`).all(threshold,threshold,...args);
+  const daily=db.prepare(`SELECT p.date,COUNT(*) records,COUNT(DISTINCT p.worker_id) workers,COALESCE(SUM(p.boxes),0) boxes,COALESCE(SUM(MAX(p.boxes-?,0)),0) excess_boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25 ELSE 0 END),0) payment,COALESCE(SUM(CASE WHEN ${eligible} THEN 0 ELSE 1 END),0) nonpay_records FROM production p JOIN workers w ON w.id=p.worker_id${wsql} GROUP BY p.date ORDER BY p.date DESC`).all(threshold,threshold,...args);
+  const details=db.prepare(`SELECT p.date,w.name,w.code,p.boxes,COALESCE(p.excess90,MAX(p.boxes-?,0)) excess_boxes,CASE WHEN ${eligible} THEN COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25 ELSE 0 END payment,CASE WHEN p.cat1>${catLimit} THEN 'Não paga: CAT 1 acima de '+${catLimit}+'%' WHEN p.cat3>${catLimit} THEN 'Não paga: CAT 3 acima de '+${catLimit}+'%' WHEN p.industry>=${indLimit} THEN 'Não paga: Indústria em '+${indLimit}+'% ou mais' ELSE 'Elegível para pagamento' END payment_reason FROM production p JOIN workers w ON w.id=p.worker_id${wsql} ORDER BY p.date DESC,p.id DESC LIMIT 500`).all(threshold,threshold,...args);
   res.json({summary,top,daily,details,threshold});
 });
 app.listen(process.env.PORT||3000,()=>console.log('Packing House em http://localhost:'+(process.env.PORT||3000)));
