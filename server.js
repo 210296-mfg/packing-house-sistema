@@ -40,7 +40,11 @@ if(!db.prepare("SELECT 1 FROM settings WHERE key='payment_threshold'").get()) db
 if(!db.prepare("SELECT 1 FROM settings WHERE key='cat_error_limit'").get()) db.prepare("INSERT INTO settings(key,value) VALUES('cat_error_limit','10')").run();
 if(!db.prepare("SELECT 1 FROM settings WHERE key='industry_error_limit'").get()) db.prepare("INSERT INTO settings(key,value) VALUES('industry_error_limit','6')").run();
 function payEligible(cat1,cat3,industry){const catLimit=Number(db.prepare("SELECT value FROM settings WHERE key='cat_error_limit'").get()?.value||10);const indLimit=Number(db.prepare("SELECT value FROM settings WHERE key='industry_error_limit'").get()?.value||6);return Number(cat1||0)<=catLimit && Number(cat3||0)<=catLimit && Number(industry||0)<indLimit;}
-function paymentFor(boxes,rate,cat1,cat3,industry){const threshold=90;const fixedRate=0.25;return payEligible(cat1,cat3,industry)?Math.max(Number(boxes||0)-threshold,0)*fixedRate:0;}
+function paymentFor(boxes,rate,cat1,cat3,industry){
+  const threshold=90;
+  const paymentRate=0.25;
+  return Math.max(Number(boxes||0)-threshold,0)*paymentRate;
+}
 function paymentReason(cat1,cat3,industry){const catLimit=Number(db.prepare("SELECT value FROM settings WHERE key='cat_error_limit'").get()?.value||10);const indLimit=Number(db.prepare("SELECT value FROM settings WHERE key='industry_error_limit'").get()?.value||6);if(Number(cat1||0)>catLimit)return `Não paga: CAT 1 acima de ${catLimit}%`;if(Number(cat3||0)>catLimit)return `Não paga: CAT 3 acima de ${catLimit}%`;if(Number(industry||0)>=indLimit)return `Não paga: Indústria em ${indLimit}% ou mais`;return 'Elegível para pagamento';}
 app.get('/api/workers',auth,(req,res)=>res.json(db.prepare('SELECT * FROM workers ORDER BY name').all()));
 app.post('/api/workers',auth,roles('admin','gerente','supervisor'),(req,res)=>{try{const r=db.prepare('INSERT INTO workers(name,code,rate) VALUES(?,?,?)').run(req.body.name,req.body.code,Number(req.body.rate||0));res.json({id:r.lastInsertRowid})}catch(e){res.status(400).json({error:'Código já cadastrado ou dados inválidos'})}});
