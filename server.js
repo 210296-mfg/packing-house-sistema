@@ -13,14 +13,27 @@ function auth(req,res,next){try{const h=req.headers.authorization||'';const t=h.
 function roles(...rs){return (req,res,next)=>rs.includes(req.user.role)?next():res.status(403).json({error:'Sem permissão'})}
 app.post('/api/login',(req,res)=>{const u=db.prepare('SELECT * FROM users WHERE username=? AND active=1').get(req.body.username);if(!u||!bcrypt.compareSync(req.body.password,u.password))return res.status(401).json({error:'Usuário ou senha inválidos'});const token=jwt.sign({id:u.id,name:u.name,username:u.username,role:u.role},JWT_SECRET,{expiresIn:'12h'});res.json({token,user:{id:u.id,name:u.name,username:u.username,role:u.role}})});
 app.get('/api/me',auth,(req,res)=>res.json(req.user));
-app.delete('/api/admin/delete-import-2026-08-19',auth,roles('admin'),(req,res)=>{
+app.delete('/api/admin/delete-import',auth,roles('admin'),(req,res)=>{
   try{
+    const from=String(req.body.from||'');
+    const to=String(req.body.to||'');
+    if(!/^\\d{4}-\\d{2}-\\d{2}$/.test(from)||!/^\\d{4}-\\d{2}-\\d{2}$/.test(to))
+      return res.status(400).json({error:'Informe data inicial e final.'});
+    if(from>to)
+      return res.status(400).json({error:'A data inicial não pode ser maior que a data final.'});
+
     const result=db.prepare(`
       DELETE FROM production
-      WHERE date='2026-08-19'
+      WHERE date>=?
+      AND date<=?
       AND notes LIKE 'Importado da planilha:%'
-    `).run();
-    res.json({ok:true,deleted:result.changes});
+    `).run(from,to);
+
+    res.json({ok:true,deleted:result.changes,from,to});
+  }catch(e){
+    res.status(500).json({error:'Erro ao apagar importações: '+e.message});
+  }
+});
   }catch(e){
     res.status(500).json({error:'Erro ao apagar importação: '+e.message});
   }
