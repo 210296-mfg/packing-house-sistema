@@ -171,98 +171,77 @@ async function loadDash(){
     const from=document.getElementById('dashFrom').value;
     const to=document.getElementById('dashTo').value;
 
-    let url='/production';
     const params=new URLSearchParams();
-
     if(from) params.set('from',from);
     if(to) params.set('to',to);
 
-    if(params.toString()) url+='?'+params.toString();
+    const url=params.toString()
+      ? '/dashboard?'+params.toString()
+      : '/dashboard';
 
     const x=await api(url);
-    const rows=Array.isArray(x)?x:(x.production||[]);
 
-    let totalBoxes=0;
-    let totalExcess=0;
-    let totalPay=0;
+    const summary=x.summary||{};
+    const top=x.top||[];
+    const daily=x.daily||[];
+    const details=x.details||[];
 
-    const workers={};
-    const days={};
+    document.getElementById('sbox').textContent=
+      Number(summary.boxes||0).toLocaleString('pt-BR');
 
-    rows.forEach(r=>{
-      const boxes=Number(r.boxes||0);
-      const excess=Number(r.excess90||Math.max(0,boxes-90));
-      const payment=Number(r.payment||0);
-      const name=r.worker_name||r.name||'Sem nome';
-      const day=r.date||'';
+    document.getElementById('sexcess').textContent=
+      Number(summary.excess_boxes||0).toLocaleString('pt-BR');
 
-      totalBoxes+=boxes;
-      totalExcess+=excess;
-      totalPay+=payment;
+    document.getElementById('spay').textContent=
+      brl(summary.payment||0);
 
-      if(!workers[name]){
-        workers[name]={boxes:0,excess:0,payment:0};
-      }
+    document.getElementById('sw').textContent=
+      Number(summary.workers||0);
 
-      workers[name].boxes+=boxes;
-      workers[name].excess+=excess;
-      workers[name].payment+=payment;
-
-      if(!days[day]){
-        days[day]={
-          workers:{},
-          records:0,
-          boxes:0,
-          excess:0,
-          payment:0
-        };
-      }
-
-      days[day].workers[name]=true;
-      days[day].records++;
-      days[day].boxes+=boxes;
-      days[day].excess+=excess;
-      days[day].payment+=payment;
-    });
-
-    document.getElementById('sbox').textContent=totalBoxes.toLocaleString('pt-BR');
-    document.getElementById('sexcess').textContent=totalExcess.toLocaleString('pt-BR');
-    document.getElementById('spay').textContent=brl(totalPay);
-    document.getElementById('sw').textContent=Object.keys(workers).length;
-    document.getElementById('sr').textContent=rows.length+' registros';
+    document.getElementById('sr').textContent=
+      Number(summary.records||0)+' registros';
 
     document.getElementById('dailyTable').innerHTML=
-      Object.keys(days).sort().reverse().map(day=>{
-        const d=days[day];
-        return '<tr><td>'+formatDate(day)+'</td><td>'+
-          Object.keys(d.workers).length+'</td><td>'+d.records+
-          '</td><td>'+d.boxes.toLocaleString('pt-BR')+
-          '</td><td>'+d.excess.toLocaleString('pt-BR')+
-          '</td><td>'+brl(d.payment)+'</td></tr>';
-      }).join('');
+      daily.map(d=>`
+        <tr>
+          <td>${formatDate(d.date)}</td>
+          <td>${Number(d.workers||0)}</td>
+          <td>${Number(d.records||0)}</td>
+          <td>${Number(d.boxes||0).toLocaleString('pt-BR')}</td>
+          <td>${Number(d.excess_boxes||0).toLocaleString('pt-BR')}</td>
+          <td>${brl(d.payment||0)}</td>
+        </tr>
+      `).join('');
 
     document.getElementById('ranking').innerHTML=
-      Object.entries(workers)
-      .sort((a,b)=>b[1].boxes-a[1].boxes)
-      .map(([name,d])=>
-        '<tr><td>'+name+'</td><td>'+d.boxes.toLocaleString('pt-BR')+
-        '</td><td>'+d.excess.toLocaleString('pt-BR')+
-        '</td><td>'+brl(d.payment)+'</td></tr>'
-      ).join('');
+      top.map(d=>`
+        <tr>
+          <td>${d.name||'Sem nome'}</td>
+          <td>${Number(d.boxes||0).toLocaleString('pt-BR')}</td>
+          <td>${Number(d.excess_boxes||0).toLocaleString('pt-BR')}</td>
+          <td>${brl(d.payment||0)}</td>
+        </tr>
+      `).join('');
 
     document.getElementById('detailTable').innerHTML=
-      rows.map(r=>{
-        const boxes=Number(r.boxes||0);
-        const excess=Number(r.excess90||Math.max(0,boxes-90));
-        return '<tr><td>'+formatDate(r.date)+'</td><td>'+
-          (r.worker_name||r.name||'')+'</td><td>'+boxes+
-          '</td><td>'+excess+'</td><td>'+brl(r.payment||0)+
-          '</td><td>'+(r.status||'OK')+'</td></tr>';
-      }).join('');
+      details.map(r=>`
+        <tr>
+          <td>${formatDate(r.date)}</td>
+          <td>${r.name||''}</td>
+          <td>${Number(r.boxes||0).toLocaleString('pt-BR')}</td>
+          <td>${Number(r.excess_boxes||0).toLocaleString('pt-BR')}</td>
+          <td>${brl(r.payment||0)}</td>
+          <td>${r.payment_reason||'OK'}</td>
+        </tr>
+      `).join('');
 
   }catch(e){
     console.error('Erro no dashboard:',e);
     document.getElementById('sbox').textContent='Erro';
+    document.getElementById('sexcess').textContent='0';
+    document.getElementById('spay').textContent='R$ 0,00';
+    document.getElementById('sw').textContent='0';
+    document.getElementById('sr').textContent='Erro ao carregar';
   }
 }
 
