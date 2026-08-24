@@ -13,7 +13,7 @@ function auth(req,res,next){try{const h=req.headers.authorization||'';const t=h.
 function roles(...rs){return (req,res,next)=>rs.includes(req.user.role)?next():res.status(403).json({error:'Sem permissão'})}
 app.post('/api/login',(req,res)=>{const u=db.prepare('SELECT * FROM users WHERE username=? AND active=1').get(req.body.username);if(!u||!bcrypt.compareSync(req.body.password,u.password))return res.status(401).json({error:'Usuário ou senha inválidos'});const token=jwt.sign({id:u.id,name:u.name,username:u.username,role:u.role},JWT_SECRET,{expiresIn:'12h'});res.json({token,user:{id:u.id,name:u.name,username:u.username,role:u.role}})});
 app.get('/api/me',auth,(req,res)=>res.json(req.user));
-app.delete('/api/admin/delete-import',auth,roles('admin'),(req,res)=>{
+app.delete('/api/admin/delete-import',auth,roles('admin','gerente'),(req,res)=>{
   try{
     const from=String(req.body.from||'');
     const to=String(req.body.to||'');
@@ -26,7 +26,7 @@ app.delete('/api/admin/delete-import',auth,roles('admin'),(req,res)=>{
       DELETE FROM production
       WHERE date>=?
       AND date<=?
-      AND notes LIKE 'Importado da planilha:%'
+      AND (notes LIKE 'Importado da planilha:%' OR notes='Importado por imagem/OCR')
     `).run(from,to);
 
     res.json({ok:true,deleted:result.changes,from,to});
