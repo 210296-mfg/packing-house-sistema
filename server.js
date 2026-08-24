@@ -78,11 +78,15 @@ app.get('/api/production',auth,(req,res)=>{
         w.rate,
 
         CASE
-          WHEN p.cat1 <= ?
-           AND p.cat3 <= ?
-           AND p.industry < ?
-          THEN COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25
-          ELSE 0
+          WHEN p.boxes <= ?
+            THEN 0
+          WHEN p.cat1 > ?
+            THEN 0
+          WHEN p.cat3 > ?
+            THEN 0
+          WHEN p.industry >= ?
+            THEN 0
+          ELSE COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25
         END AS payment,
 
         CASE
@@ -92,6 +96,8 @@ app.get('/api/production',auth,(req,res)=>{
             THEN 'Não paga: CAT 3 acima de ' || ? || '%'
           WHEN p.industry >= ?
             THEN 'Não paga: Indústria em ' || ? || '% ou mais'
+          WHEN p.boxes <= ?
+            THEN 'Não atingiu o limite de ' || ? || ' caixas'
           ELSE 'Elegível para pagamento'
         END AS payment_reason
 
@@ -101,16 +107,20 @@ app.get('/api/production',auth,(req,res)=>{
     `;
 
     const args=[
+      threshold,
       catLimit,
       catLimit,
       indLimit,
       threshold,
+
       catLimit,
       catLimit,
       catLimit,
       catLimit,
       indLimit,
-      indLimit
+      indLimit,
+      threshold,
+      threshold
     ];
 
     if(from){
@@ -394,17 +404,164 @@ app.delete('/api/production/:id',auth,roles('admin','gerente'),(req,res)=>{db.pr
 // Normaliza registros antigos importados que armazenavam percentuais como fração (0,08 -> 8).
 db.prepare("UPDATE production SET cat1=cat1*100 WHERE source_note LIKE 'valor da planilha' AND cat1>0 AND cat1<=1").run(); db.prepare("UPDATE production SET cat3=cat3*100 WHERE source_note LIKE 'valor da planilha' AND cat3>0 AND cat3<=1").run(); db.prepare("UPDATE production SET industry=industry*100 WHERE source_note LIKE 'valor da planilha' AND industry>0 AND industry<=1").run();
 app.get('/api/dashboard',auth,(req,res)=>{
-  const {from,to}=req.query;
-  const where=[]; const args=[];
-  if(from){where.push('p.date>=?');args.push(from)}
-  if(to){where.push('p.date<=?');args.push(to)}
-  const wsql=where.length?' WHERE '+where.join(' AND '):'';
-  const threshold=Number(db.prepare("SELECT value FROM settings WHERE key='payment_threshold'").get()?.value||90);
-  const catLimit=Number(db.prepare("SELECT value FROM settings WHERE key='cat_error_limit'").get()?.value||10); const indLimit=Number(db.prepare("SELECT value FROM settings WHERE key='industry_error_limit'").get()?.value||6); const eligible=`(p.cat1<=${catLimit} AND p.cat3<=${catLimit} AND p.industry<${indLimit})`;
-  const summary=db.prepare(`SELECT COUNT(*) records,COALESCE(SUM(p.boxes),0) boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25 ELSE 0 END),0) payment,COUNT(DISTINCT p.worker_id) workers,COALESCE(SUM(MAX(p.boxes-?,0)),0) excess_boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN 0 ELSE 1 END),0) nonpay_records FROM production p JOIN workers w ON w.id=p.worker_id${wsql}`).get(threshold,threshold,...args);
-  const top=db.prepare(`SELECT w.name,w.code,COALESCE(SUM(p.boxes),0) boxes,COALESCE(SUM(MAX(p.boxes-?,0)),0) excess_boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25 ELSE 0 END),0) payment,COALESCE(SUM(CASE WHEN ${eligible} THEN 0 ELSE 1 END),0) nonpay_records FROM workers w LEFT JOIN production p ON p.worker_id=w.id${where.length?' AND '+where.join(' AND '):''} GROUP BY w.id ORDER BY boxes DESC LIMIT 20`).all(threshold,threshold,...args);
-  const daily=db.prepare(`SELECT p.date,COUNT(*) records,COUNT(DISTINCT p.worker_id) workers,COALESCE(SUM(p.boxes),0) boxes,COALESCE(SUM(MAX(p.boxes-?,0)),0) excess_boxes,COALESCE(SUM(CASE WHEN ${eligible} THEN COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25 ELSE 0 END),0) payment,COALESCE(SUM(CASE WHEN ${eligible} THEN 0 ELSE 1 END),0) nonpay_records FROM production p JOIN workers w ON w.id=p.worker_id${wsql} GROUP BY p.date ORDER BY p.date DESC`).all(threshold,threshold,...args);
-  const details=db.prepare(`SELECT p.date,w.name,w.code,p.boxes,COALESCE(p.excess90,MAX(p.boxes-?,0)) excess_boxes,CASE WHEN ${eligible} THEN COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25 ELSE 0 END payment,CASE WHEN p.cat1>${catLimit} THEN 'Não paga: CAT 1 acima de '+${catLimit}+'%' WHEN p.cat3>${catLimit} THEN 'Não paga: CAT 3 acima de '+${catLimit}+'%' WHEN p.industry>=${indLimit} THEN 'Não paga: Indústria em '+${indLimit}+'% ou mais' ELSE 'Elegível para pagamento' END payment_reason FROM production p JOIN workers w ON w.id=p.worker_id${wsql} ORDER BY p.date DESC,p.id DESC LIMIT 500`).all(threshold,threshold,...args);
-  res.json({summary,top,daily,details,threshold});
+  try{
+    const {from,to}=req.query;
+
+    const threshold=Number(
+      db.prepare("SELECT value FROM settings WHERE key='payment_threshold'")
+        .get()?.value || 90
+    );
+
+    const catLimit=Number(
+      db.prepare("SELECT value FROM settings WHERE key='cat_error_limit'")
+        .get()?.value || 10
+    );
+
+    const indLimit=Number(
+      db.prepare("SELECT value FROM settings WHERE key='industry_error_limit'")
+        .get()?.value || 6
+    );
+
+    const where=[];
+    const args=[];
+
+    if(from){
+      where.push('p.date>=?');
+      args.push(from);
+    }
+
+    if(to){
+      where.push('p.date<=?');
+      args.push(to);
+    }
+
+    const filter=where.length ? ' AND '+where.join(' AND ') : '';
+
+    const eligible=`
+      p.boxes > ${threshold}
+      AND p.cat1 <= ${catLimit}
+      AND p.cat3 <= ${catLimit}
+      AND p.industry < ${indLimit}
+    `;
+
+    const excess=`
+      CASE
+        WHEN ${eligible}
+        THEN COALESCE(p.excess90,MAX(p.boxes-${threshold},0))
+        ELSE 0
+      END
+    `;
+
+    const payment=`
+      CASE
+        WHEN ${eligible}
+        THEN COALESCE(p.excess90,MAX(p.boxes-${threshold},0))*0.25
+        ELSE 0
+      END
+    `;
+
+    const reason=`
+      CASE
+        WHEN p.boxes <= ${threshold}
+          THEN 'Não atingiu o limite de ${threshold} caixas'
+        WHEN p.cat1 > ${catLimit}
+          THEN 'Não paga: CAT 1 acima de ${catLimit}%'
+        WHEN p.cat3 > ${catLimit}
+          THEN 'Não paga: CAT 3 acima de ${catLimit}%'
+        WHEN p.industry >= ${indLimit}
+          THEN 'Não paga: Indústria em ${indLimit}% ou mais'
+        ELSE 'Elegível para pagamento'
+      END
+    `;
+
+    const summary=db.prepare(`
+      SELECT
+        COUNT(*) AS records,
+        COALESCE(SUM(p.boxes),0) AS boxes,
+        COALESCE(SUM(${excess}),0) AS excess_boxes,
+        COALESCE(SUM(${payment}),0) AS payment,
+        COUNT(DISTINCT p.worker_id) AS workers,
+        COALESCE(SUM(
+          CASE WHEN ${eligible} THEN 0 ELSE 1 END
+        ),0) AS nonpay_records
+      FROM production p
+      JOIN workers w ON w.id=p.worker_id
+      WHERE 1=1${filter}
+    `).get(...args);
+
+    const top=db.prepare(`
+      SELECT
+        w.name,
+        w.code,
+        COALESCE(SUM(p.boxes),0) AS boxes,
+        COALESCE(SUM(${excess}),0) AS excess_boxes,
+        COALESCE(SUM(${payment}),0) AS payment,
+        COALESCE(SUM(
+          CASE WHEN ${eligible} THEN 0 ELSE 1 END
+        ),0) AS nonpay_records
+      FROM workers w
+      LEFT JOIN production p
+        ON p.worker_id=w.id${filter}
+      GROUP BY w.id
+      HAVING COUNT(p.id)>0
+      ORDER BY boxes DESC
+    `).all(...args);
+
+    const daily=db.prepare(`
+      SELECT
+        p.date,
+        COUNT(*) AS records,
+        COUNT(DISTINCT p.worker_id) AS workers,
+        COALESCE(SUM(p.boxes),0) AS boxes,
+        COALESCE(SUM(${excess}),0) AS excess_boxes,
+        COALESCE(SUM(${payment}),0) AS payment,
+        COALESCE(SUM(
+          CASE WHEN ${eligible} THEN 0 ELSE 1 END
+        ),0) AS nonpay_records
+      FROM production p
+      JOIN workers w ON w.id=p.worker_id
+      WHERE 1=1${filter}
+      GROUP BY p.date
+      ORDER BY p.date DESC
+    `).all(...args);
+
+    const details=db.prepare(`
+      SELECT
+        p.id,
+        p.date,
+        w.name,
+        w.code,
+        p.boxes,
+        p.cat1,
+        p.cat3,
+        p.industry,
+        ${excess} AS excess_boxes,
+        ${payment} AS payment,
+        ${reason} AS payment_reason
+      FROM production p
+      JOIN workers w ON w.id=p.worker_id
+      WHERE 1=1${filter}
+      ORDER BY p.date DESC,p.id DESC
+      LIMIT 500
+    `).all(...args);
+
+    res.json({
+      summary,
+      top,
+      daily,
+      details,
+      threshold,
+      catLimit,
+      indLimit
+    });
+
+  }catch(e){
+    console.error('Erro no dashboard:',e);
+
+    res.status(500).json({
+      error:'Erro ao carregar dashboard: '+e.message
+    });
+  }
 });
+
 app.listen(process.env.PORT||3000,()=>console.log('Packing House em http://localhost:'+(process.env.PORT||3000)));

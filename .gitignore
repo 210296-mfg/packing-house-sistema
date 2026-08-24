@@ -1,0 +1,6 @@
+node_modules/
+packing.db
+*.bak
+*.bak2
+*.swp
+.env
