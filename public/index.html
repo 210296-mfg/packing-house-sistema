@@ -298,33 +298,83 @@ async function editProduction(id){
 }
 
 async function deleteImport(){
-  if(user?.role!=='admin'){
-    alert('Somente o administrador pode apagar importações.');
-    return;
-  }
-  const from=deleteFrom.value;
-  const to=deleteTo.value;
-  if(!from||!to){
-    alert('Informe a data inicial e a data final.');
-    return;
-  }
-  if(from>to){
-    alert('A data inicial não pode ser maior que a data final.');
-    return;
-  }
-  if(!confirm('ATENÇÃO! Serão apagados somente os registros IMPORTADOS DA PLANILHA entre '+formatDate(from)+' e '+formatDate(to)+'.\n\nDeseja continuar?')) return;
   try{
+    const me=await fetch('/api/me',{
+      headers:{Authorization:'Bearer '+token}
+    });
+
+    if(!me.ok){
+      localStorage.removeItem('ph_token');
+      localStorage.removeItem('ph_user');
+      token='';
+      user=null;
+      document.getElementById('loginPanel').classList.remove('hidden');
+      document.getElementById('app').classList.add('hidden');
+      alert('Sua sessão expirou. Faça login novamente como administrador.');
+      return;
+    }
+
+    const currentUser=await me.json();
+
+    if(currentUser.role!=='admin'){
+      im.textContent='❌ Somente o administrador pode apagar importações.';
+      return;
+    }
+
+    const from=document.getElementById('deleteFrom').value;
+    const to=document.getElementById('deleteTo').value;
+
+    if(!from||!to){
+      im.textContent='❌ Informe a data inicial e a data final.';
+      return;
+    }
+
+    if(from>to){
+      im.textContent='❌ A data inicial não pode ser maior que a data final.';
+      return;
+    }
+
+    if(!confirm(
+      'ATENÇÃO! Serão apagados somente os registros IMPORTADOS DA PLANILHA entre '+
+      formatDate(from)+' e '+formatDate(to)+
+      '.\n\nDeseja continuar?'
+    )) return;
+
     const r=await fetch('/api/admin/delete-import',{
       method:'DELETE',
-      headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},
-      body:JSON.stringify({from,to})
+      headers:{
+        'Content-Type':'application/json',
+        'Authorization':'Bearer '+token
+      },
+      body:JSON.stringify({from:from,to:to})
     });
+
     const x=await r.json();
-    if(!r.ok) throw Error(x.error||'Erro ao apagar importações');
-    im.textContent='Importações apagadas: '+(x.deleted||0)+' registros.';
-    await loadDash();
+
+    if(r.status===401){
+      localStorage.removeItem('ph_token');
+      localStorage.removeItem('ph_user');
+      token='';
+      user=null;
+      document.getElementById('loginPanel').classList.remove('hidden');
+      document.getElementById('app').classList.add('hidden');
+      im.textContent='❌ Sessão expirada. Faça login novamente.';
+      return;
+    }
+
+    if(!r.ok){
+      throw Error(x.error||'Erro ao apagar importações');
+    }
+
+    im.textContent='✅ Importações apagadas: '+(x.deleted||0)+' registros.';
+
+    if(typeof loadDash==='function'){
+      await loadDash();
+    }
+
   }catch(e){
-    im.textContent=e.message;
+    console.error(e);
+    im.textContent='❌ '+e.message;
   }
 }
 async function importFileNow(){
