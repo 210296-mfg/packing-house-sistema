@@ -48,128 +48,33 @@
   }
 }
 function logout(){localStorage.clear();location.reload()}function tab(id,b){document.querySelectorAll('main section').forEach(x=>x.classList.add('hidden'));document.getElementById(id).classList.remove('hidden');document.querySelectorAll('.nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');if(id==='dash')loadDash();if(id==='prod')loadProd();if(id==='workers')loadWorkers();if(id==='users')loadUsers();if(id==='settings')loadSettings()}async function editProduction(id){
-  try{
-    const r = await api('/production/'+id);
-    
-    const workerId = r.worker_id;
-    const data = prompt(
-      'Editar lançamento
+  const novoBoxes=prompt("Quantidade de caixas:");
+  if(novoBoxes===null)return;
 
-Digite: CAIXAS,CAT1,CAT3,INDUSTRIA
-
-Exemplo: 150,5,3,0',
-      `${r.boxes},${r.cat1},${r.cat3},${r.industry}`
-    );
-
-    if(data===null)return;
-
-    const parts=data.split(',').map(x=>x.trim());
-
-    if(parts.length!==4){
-      alert('Formato inválido. Use: CAIXAS,CAT1,CAT3,INDUSTRIA');
-      return;
-    }
-
-    const boxes=Number(parts[0]);
-    const cat1=Number(parts[1]);
-    const cat3=Number(parts[2]);
-    const industry=Number(parts[3]);
-
-    if(!Number.isFinite(boxes) || boxes<0){
-      alert('Quantidade de caixas inválida.');
-      return;
-    }
-
-    const response=await fetch('/api/production/'+id,{
-      method:'PUT',
-      headers:{
-        'Content-Type':'application/json',
-        'Authorization':'Bearer '+token
-      },
-      body:JSON.stringify({
-        worker_id:workerId,
-        date:r.date,
-        boxes,
-        cat1,
-        cat3,
-        industry,
-        notes:r.notes||''
-      })
-    });
-
-    const text=await response.text();
-
-    let result;
-    try{
-      result=JSON.parse(text);
-    }catch(e){
-      console.error('Resposta recebida:',text);
-      throw Error('O servidor não retornou JSON. Verifique se o servidor está rodando corretamente.');
-    }
-
-    if(!response.ok){
-      throw Error(result.error||'Erro ao editar produção.');
-    }
-
-    alert('Lançamento editado com sucesso!');
-
-    loadDash();
-
-  }catch(e){
-    alert('Erro ao editar: '+e.message);
-    console.error(e);
+  const boxes=Number(novoBoxes);
+  if(!Number.isFinite(boxes)||boxes<0){
+    alert("Quantidade de caixas inválida.");
+    return;
   }
-}
 
-async function loadDash(){
-  const q=new URLSearchParams();if(dashFrom.value)q.set('from',dashFrom.value);if(dashTo.value)q.set('to',dashTo.value);
-  let x=await api('/dashboard'+(q.toString()?'?'+q.toString():''));
-  sbox.textContent=Number(x.summary.boxes||0).toLocaleString('pt-BR');sexcess.textContent=Number(x.summary.excess_boxes||0).toLocaleString('pt-BR');spay.textContent=Number(x.summary.payment||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});sw.textContent=x.summary.workers||0;sr.textContent=(x.summary.records||0)+' registros';
-  dailyTable.innerHTML=x.daily.length?x.daily.map(r=>`<tr><td>${formatDate(r.date)}</td><td>${r.workers}</td><td>${r.records}</td><td>${Number(r.boxes).toLocaleString('pt-BR')}</td><td>${Number(r.excess_boxes).toLocaleString('pt-BR')}</td><td>${brl(r.payment)}</td></tr>`).join(''):`<tr><td colspan="6">Nenhum lançamento no período.</td></tr>`;
-  ranking.innerHTML=x.top.map(r=>`<tr><td>${r.name}</td><td>${Number(r.boxes).toLocaleString('pt-BR')}</td><td>${Number(r.excess_boxes).toLocaleString('pt-BR')}</td><td>${brl(r.payment)}</td></tr>`).join('')+`<tr style="font-weight:700;border-top:2px solid #173f2a"><td>TOTAL</td><td>${Number(x.summary.boxes||0).toLocaleString('pt-BR')}</td><td>${Number(x.summary.excess_boxes||0).toLocaleString('pt-BR')}</td><td>${brl(x.summary.payment||0)}</td></tr>`;
-  detailTable.innerHTML=x.details.map(r=>`<tr><td>${formatDate(r.date)}</td><td>${r.name}</td><td>${r.boxes}</td><td>${r.excess_boxes}</td><td>${brl(r.payment)}</td><td>${r.payment_reason}</td><td>${r.name==='TOTAL'?'':`<button class="btn" onclick="editProduction(${r.id})">✏️ Editar</button>`}</td></tr>`).join('');
-}
-function calcExcess90(){
-  const boxes=Number(document.getElementById('boxes').value||0);
-  const threshold=90;
-  document.getElementById('excess90').value=Math.max(boxes-threshold,0);
-}
-function brl(v){return Number(v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'})}function formatDate(s){if(!s)return '';const [y,m,d]=s.split('-');return d+'/'+m+'/'+y}function clearDashFilter(){dashFrom.value='';dashTo.value='';loadDash()}async function loadWorkers(){let x=await api('/workers');worker.innerHTML=x.filter(w=>w.active).map(w=>`<option value="${w.id}">${w.name} (${w.code})</option>`).join('');wtable.innerHTML=x.map(w=>`<tr><td>${w.name}</td><td>${w.code}</td><td>R$ ${Number(w.rate).toFixed(2)}</td><td>${w.active?'Ativa':'Inativa'}</td></tr>`).join('')}async function loadProd(){await loadWorkers();date.value=new Date().toISOString().slice(0,10);let x=await api('/production');ptable.innerHTML=x.slice(0,50).map(r=>`<tr><td>${r.date}</td><td>${r.worker_name}</td><td>${r.boxes}</td><td>${Number(r.payment).toLocaleString('pt-BR',{style:'currency',currency:'BRL'})}</td></tr>`).join('')}async function saveWorker(){try{await api('/workers',{method:'POST',body:JSON.stringify({name:wn.value,code:wc.value,rate:wr.value})});wn.value=wc.value=wr.value='';loadWorkers()}catch(e){alert(e.message)}}async function saveProd(){
   try{
-    const boxes=Number(document.getElementById('boxes').value||0);
-
-    // Excedente calculado automaticamente acima de 90 caixas
-    const excess90=Math.max(boxes-90,0);
-
-    // Atualiza o campo visual
-    document.getElementById('excess90').value=excess90;
-
-    await api('/production',{
-      method:'POST',
+    const r=await api("/production/"+id,{
+      method:"PUT",
       body:JSON.stringify({
-        worker_id:document.getElementById('worker').value,
-        date:document.getElementById('date').value,
-        boxes:boxes,
-        cat1:Number(document.getElementById('cat1').value||0),
-        cat3:Number(document.getElementById('cat3').value||0),
-        industry:Number(document.getElementById('industry').value||0),
-        excess90:excess90,
-        notes:document.getElementById('notes').value||''
+        boxes:boxes
       })
     });
 
-    document.getElementById('pm').textContent='Lançamento salvo.';
-    document.getElementById('boxes').value='';
-    document.getElementById('excess90').value='0';
-    document.getElementById('cat1').value='';
-    document.getElementById('cat3').value='';
-    document.getElementById('industry').value='';
-    document.getElementById('notes').value='';
+    if(!r.ok){
+      throw new Error(r.error||"Erro ao editar lançamento");
+    }
 
-    loadDash();
+    alert("Lançamento atualizado com sucesso.");
+    await loadDash();
 
   }catch(e){
-    document.getElementById('pm').textContent=e.message;
+    console.error(e);
+    alert("Erro ao editar: "+e.message);
   }
 }
 
