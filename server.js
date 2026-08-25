@@ -39,7 +39,69 @@ app.put('/api/settings',auth,roles('admin','gerente'),(req,res)=>{const n=Number
 if(!db.prepare("SELECT 1 FROM settings WHERE key='payment_threshold'").get()) db.prepare("INSERT INTO settings(key,value) VALUES('payment_threshold','90')").run();
 if(!db.prepare("SELECT 1 FROM settings WHERE key='cat_error_limit'").get()) db.prepare("INSERT INTO settings(key,value) VALUES('cat_error_limit','10')").run();
 if(!db.prepare("SELECT 1 FROM settings WHERE key='industry_error_limit'").get()) db.prepare("INSERT INTO settings(key,value) VALUES('industry_error_limit','6')").run();
-function payEligible(cat1,cat3,industry){const catLimit=Number(db.prepare("SELECT value FROM settings WHERE key='cat_error_limit'").get()?.value||10);const indLimit=Number(db.prepare("SELECT value FROM settings WHERE key='industry_error_limit'").get()?.value||6);return Number(cat1||0)<=catLimit && Number(cat3||0)<=catLimit && Number(industry||0)<indLimit;}
+function validateCat1(sample1,sample2=null){
+  const catLimit=Number(db.prepare("SELECT value FROM settings WHERE key='cat_error_limit'").get()?.value||10);
+  const s1=Number(sample1||0);
+
+  // 1ª amostra dentro do limite: aprovado imediatamente.
+  // NÃO realiza segunda amostra.
+  if(s1<=catLimit){
+    return {
+      status:'APROVADO',
+      sample1:s1,
+      sample2:null,
+      secondRequired:false,
+      paymentEligible:true
+    };
+  }
+
+  // 1ª amostra acima do limite: exige segunda amostra.
+  if(sample2===null || sample2===undefined || sample2===''){
+    return {
+      status:'SEGUNDA_AMOSTRA',
+      sample1:s1,
+      sample2:null,
+      secondRequired:true,
+      paymentEligible:false
+    };
+  }
+
+  const s2=Number(sample2);
+
+  // 2ª amostra dentro do limite: aprovado.
+  if(s2<=catLimit){
+    return {
+      status:'APROVADO',
+      sample1:s1,
+      sample2:s2,
+      secondRequired:false,
+      paymentEligible:true
+    };
+  }
+
+  // As duas amostras estão acima do limite.
+  return {
+    status:'REPROVADO',
+    sample1:s1,
+    sample2:s2,
+    secondRequired:false,
+    paymentEligible:false
+  };
+}
+
+function payEligible(cat1,cat3,industry,cat1_sample1=null,cat1_sample2=null){
+  const cat=validateCat1(
+    cat1_sample1===null ? cat1 : cat1_sample1,
+    cat1_sample2
+  );
+
+  const catLimit=Number(db.prepare("SELECT value FROM settings WHERE key='cat_error_limit'").get()?.value||10);
+  const indLimit=Number(db.prepare("SELECT value FROM settings WHERE key='industry_error_limit'").get()?.value||6);
+
+  return cat.paymentEligible &&
+    Number(cat3||0)<=catLimit &&
+    Number(industry||0)<indLimit;
+}
 function paymentFor(boxes,rate,cat1,cat3,industry){
   const threshold=90;
   const paymentRate=0.25;
@@ -80,24 +142,44 @@ app.get('/api/production',auth,(req,res)=>{
         CASE
           WHEN p.boxes <= ?
             THEN 0
-          WHEN p.cat1 > ?
+
+          WHEN NOT (
+            COALESCE(p.cat1_sample1,p.cat1) <= ?
+            OR (
+              COALESCE(p.cat1_sample1,p.cat1) > ?
+              AND p.cat1_sample2 IS NOT NULL
+              AND p.cat1_sample2 <= ?
+            )
+          )
             THEN 0
+
           WHEN p.cat3 > ?
             THEN 0
+
           WHEN p.industry >= ?
             THEN 0
+
           ELSE COALESCE(p.excess90,MAX(p.boxes-?,0))*0.25
         END AS payment,
 
         CASE
-          WHEN p.cat1 > ?
-            THEN 'Não paga: CAT 1 acima de ' || ? || '%'
-          WHEN p.cat3 > ?
-            THEN 'Não paga: CAT 3 acima de ' || ? || '%'
-          WHEN p.industry >= ?
-            THEN 'Não paga: Indústria em ' || ? || '% ou mais'
           WHEN p.boxes <= ?
             THEN 'Não atingiu o limite de ' || ? || ' caixas'
+
+          WHEN COALESCE(p.cat1_sample1,p.cat1) > ?
+               AND p.cat1_sample2 IS NULL
+            THEN 'Aguardando 2ª amostra de CAT 1'
+
+          WHEN COALESCE(p.cat1_sample1,p.cat1) > ?
+               AND p.cat1_sample2 > ?
+            THEN 'Não paga: 2ª amostra CAT 1 acima de ' || ? || '%'
+
+          WHEN p.cat3 > ?
+            THEN 'Não paga: CAT 3 acima de ' || ? || '%'
+
+          WHEN p.industry >= ?
+            THEN 'Não paga: Indústria em ' || ? || '% ou mais'
+
           ELSE 'Elegível para pagamento'
         END AS payment_reason
 
@@ -107,20 +189,26 @@ app.get('/api/production',auth,(req,res)=>{
     `;
 
     const args=[
+      // CASE PAYMENT
       threshold,
+      catLimit,
+      catLimit,
       catLimit,
       catLimit,
       indLimit,
       threshold,
 
-      catLimit,
-      catLimit,
-      catLimit,
-      catLimit,
-      indLimit,
-      indLimit,
+      // CASE PAYMENT REASON
       threshold,
-      threshold
+      threshold,
+      catLimit,
+      catLimit,
+      catLimit,
+      catLimit,
+      catLimit,
+      catLimit,
+      indLimit,
+      indLimit
     ];
 
     if(from){
@@ -153,8 +241,116 @@ app.get('/api/production',auth,(req,res)=>{
   }
 });
 
-app.post('/api/production',auth,roles('admin','gerente','supervisor','cq','embaladora'),(req,res)=>{const boxes=Number(req.body.boxes||0),cat1=Number(req.body.cat1||0),cat3=Number(req.body.cat3||0),industry=Number(req.body.industry||0);const threshold=Number(db.prepare("SELECT value FROM settings WHERE key='payment_threshold'").get()?.value||90);const excess=Math.max(boxes-threshold,0);const r=db.prepare('INSERT INTO production(worker_id,date,boxes,cat1,cat3,industry,excess90,notes,created_by,source_value,source_note) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(req.body.worker_id,req.body.date,boxes,cat1,cat3,industry,excess,req.body.notes||'',req.user.id,null,'manual');res.json({id:r.lastInsertRowid,payment_eligible:payEligible(cat1,cat3,industry),payment_reason:paymentReason(cat1,cat3,industry)})});
+app.post('/api/production',auth,roles('admin','gerente','supervisor','cq','embaladora'),(req,res)=>{
+  try{
+    const boxes=Number(req.body.boxes||0);
 
+    const cat1_sample1=Number(
+      req.body.cat1_sample1 ?? req.body.cat1 ?? 0
+    );
+
+    const cat1_sample2=
+      req.body.cat1_sample2===undefined ||
+      req.body.cat1_sample2===null ||
+      req.body.cat1_sample2===''
+        ? null
+        : Number(req.body.cat1_sample2);
+
+    const cat3=Number(req.body.cat3||0);
+    const industry=Number(req.body.industry||0);
+
+    const threshold=Number(
+      db.prepare("SELECT value FROM settings WHERE key='payment_threshold'")
+        .get()?.value||90
+    );
+
+    const catLimit=Number(
+      db.prepare("SELECT value FROM settings WHERE key='cat_error_limit'")
+        .get()?.value||10
+    );
+
+    const indLimit=Number(
+      db.prepare("SELECT value FROM settings WHERE key='industry_error_limit'")
+        .get()?.value||6
+    );
+
+    const validation=validateCat1(
+      cat1_sample1,
+      cat1_sample2
+    );
+
+    const excess=Math.max(boxes-threshold,0);
+
+    const eligible=
+      boxes>threshold &&
+      validation.paymentEligible &&
+      cat3<=catLimit &&
+      industry<indLimit;
+
+    const r=db.prepare(`
+      INSERT OR IGNORE INTO production(
+        worker_id,
+        date,
+        boxes,
+        cat1,
+        cat1_sample1,
+        cat1_sample2,
+        cat3,
+        industry,
+        excess90,
+        notes,
+        created_by,
+        source_value,
+        source_note
+      )
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      req.body.worker_id,
+      req.body.date,
+      boxes,
+      cat1_sample1,
+      cat1_sample1,
+      cat1_sample2,
+      cat3,
+      industry,
+      excess,
+      req.body.notes||'',
+      req.user.id,
+      null,
+      'manual'
+    );
+
+    let payment_reason='Elegível para pagamento';
+
+    if(boxes<=threshold){
+      payment_reason='Não atingiu o limite de '+threshold+' caixas';
+    }else if(validation.status==='SEGUNDA_AMOSTRA'){
+      payment_reason='Aguardando 2ª amostra de CAT 1';
+    }else if(validation.status==='REPROVADO'){
+      payment_reason='Não paga: 2ª amostra CAT 1 acima de '+catLimit+'%';
+    }else if(cat3>catLimit){
+      payment_reason='Não paga: CAT 3 acima de '+catLimit+'%';
+    }else if(industry>=indLimit){
+      payment_reason='Não paga: Indústria em '+indLimit+'% ou mais';
+    }
+
+    res.json({
+      id:r.lastInsertRowid,
+      payment_eligible:eligible,
+      payment_reason:payment_reason,
+      cat1_status:validation.status,
+      cat1_sample1:cat1_sample1,
+      cat1_sample2:cat1_sample2,
+      second_sample_required:validation.secondRequired
+    });
+
+  }catch(e){
+    console.error(e);
+    res.status(400).json({
+      error:'Falha ao lançar produção: '+e.message
+    });
+  }
+});
 app.post('/api/ocr-production',auth,roles('admin','gerente','supervisor','cq'),upload.single('file'),async(req,res)=>{
   if(!req.file)return res.status(400).json({error:'Imagem não enviada'});
 
@@ -316,7 +512,7 @@ app.post('/api/import-production',auth,roles('admin','gerente','supervisor','cq'
     const insWorker=db.prepare('INSERT OR IGNORE INTO workers(name,code,rate) VALUES(?,?,?)');
     const getWorker=db.prepare('SELECT id FROM workers WHERE lower(name)=lower(?) LIMIT 1');
     const getByCode=db.prepare('SELECT id FROM workers WHERE code=? LIMIT 1');
-    const insProd=db.prepare('INSERT INTO production(worker_id,date,boxes,cat1,cat3,industry,excess90,notes,created_by,source_value,source_note) VALUES(?,?,?,?,?,?,?,?,?,?,?)');
+    const insProd=db.prepare('INSERT OR IGNORE INTO production(worker_id,date,boxes,cat1,cat3,industry,excess90,notes,created_by,source_value,source_note) VALUES(?,?,?,?,?,?,?,?,?,?,?)');
     const tx=db.transaction(()=>{
       for(const sheet of wb.SheetNames){
         const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheet],{header:1,defval:'',raw:true});
@@ -338,7 +534,7 @@ app.post('/api/import-production',auth,roles('admin','gerente','supervisor','cq'
 
           // Ignora linhas de total da planilha.
           // O total deve ser calculado pelo sistema a partir das embaladoras.
-          if(/^TOTAL(?:\\s+(?:GERAL|DO DIA|DO MÊS|DO MES))?$/i.test(name)){
+          if(/^TOTAL(?:\s+(?:GERAL|DO DIA|DO MÊS|DO MES))?$/i.test(name)){
             skipped++;
             continue;
           }
@@ -349,7 +545,9 @@ app.post('/api/import-production',auth,roles('admin','gerente','supervisor','cq'
           if(!w){const code='IMP-'+slug(name).slice(0,20)+'-'+Math.random().toString(36).slice(2,6);insWorker.run(name,code,0);w=getWorker.get(name);createdWorkers++;}
           const cat1=percent(row[cat1I]),cat3=percent(row[cat3I]),industry=percent(row[indI]); const threshold=Number(db.prepare("SELECT value FROM settings WHERE key='payment_threshold'").get()?.value||90); const excess=Math.max(boxes-threshold,0);
           const sourceValue=money(row[valI]);
-          insProd.run(w.id,dateISO(date),boxes,cat1,cat3,industry,excess,'Importado da planilha: '+sheet,req.user.id,sourceValue,sourceValue!==null?'valor da planilha':''); imported++;
+          const result=insProd.run(w.id,dateISO(date),boxes,cat1,cat3,industry,excess,'Importado da planilha: '+sheet,req.user.id,sourceValue,sourceValue!==null?'valor da planilha':'');
+          if(result.changes===1) imported++;
+          else skipped++;
         }
       }
     }); tx();
