@@ -334,7 +334,16 @@ app.post('/api/import-production',auth,roles('admin','gerente','supervisor','cq'
         if(nameI<0||boxesI<0) {skipped++;continue;}
         for(let i=headerIdx+1;i<rows.length;i++){
           const row=rows[i]; const rawName=String(row[nameI]||'').trim(); if(!rawName||rawName.toUpperCase()==='LADO 1') continue;
-          const name=rawName.replace(/\s+/g,' ').trim(); let boxes=num(row[boxesI]);
+          const name=rawName.replace(/\s+/g,' ').trim();
+
+          // Ignora linhas de total da planilha.
+          // O total deve ser calculado pelo sistema a partir das embaladoras.
+          if(/^TOTAL(?:\\s+(?:GERAL|DO DIA|DO MÊS|DO MES))?$/i.test(name)){
+            skipped++;
+            continue;
+          }
+
+          let boxes=num(row[boxesI]);
           if(boxes===null || boxes===0){skipped++;continue;}
           let w=getWorker.get(name);
           if(!w){const code='IMP-'+slug(name).slice(0,20)+'-'+Math.random().toString(36).slice(2,6);insWorker.run(name,code,0);w=getWorker.get(name);createdWorkers++;}
