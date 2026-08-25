@@ -6,7 +6,30 @@ fs.mkdirSync(path.join(__dirname,'uploads'),{recursive:true});
 db.exec(`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,username TEXT UNIQUE NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','gerente','supervisor','cq','embaladora')),active INTEGER DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS workers(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,code TEXT UNIQUE NOT NULL,rate REAL DEFAULT 0,active INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '');
-CREATE TABLE IF NOT EXISTS production(id INTEGER PRIMARY KEY AUTOINCREMENT,worker_id INTEGER NOT NULL,date TEXT NOT NULL,boxes INTEGER DEFAULT 0,cat1 REAL DEFAULT 0,cat3 REAL DEFAULT 0,industry REAL DEFAULT 0,excess90 REAL DEFAULT 0,notes TEXT,created_by INTEGER,source_value REAL,source_note TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(worker_id) REFERENCES workers(id),FOREIGN KEY(created_by) REFERENCES users(id));`);
+CREATE TABLE IF NOT EXISTS production(id INTEGER PRIMARY KEY AUTOINCREMENT,worker_id INTEGER NOT NULL,date TEXT NOT NULL,boxes INTEGER DEFAULT 0,cat1 REAL DEFAULT 0,cat3 REAL DEFAULT 0,industry REAL DEFAULT 0,excess90 REAL DEFAULT 0,notes TEXT,created_by INTEGER,source_value REAL,source_note TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(worker_id) REFERENCES workers(id),FOREIGN KEY(created_by) REFERENCES users(id));
+
+// MIGRACAO AUTOMATICA - CAT 1
+try{
+  const productionCols = db
+    .prepare("PRAGMA table_info(production)")
+    .all()
+    .map(c=>c.name);
+
+  if(!productionCols.includes('cat1_sample1')){
+    db.exec("ALTER TABLE production ADD COLUMN cat1_sample1 REAL");
+    console.log('MIGRACAO: production.cat1_sample1 criada');
+  }
+
+  if(!productionCols.includes('cat1_sample2')){
+    db.exec("ALTER TABLE production ADD COLUMN cat1_sample2 REAL");
+    console.log('MIGRACAO: production.cat1_sample2 criada');
+  }
+
+}catch(e){
+  console.error('ERRO NA MIGRACAO CAT 1:',e);
+}
+
+`);
 try{db.exec("ALTER TABLE production ADD COLUMN source_value REAL")}catch{};try{db.exec("ALTER TABLE production ADD COLUMN source_note TEXT")}catch{};
 if(!db.prepare('SELECT 1 FROM users LIMIT 1').get()) db.prepare('INSERT INTO users(name,username,password,role) VALUES(?,?,?,?)').run('Administrador','admin',bcrypt.hashSync('admin123',10),'admin');
 function auth(req,res,next){try{const h=req.headers.authorization||'';const t=h.startsWith('Bearer ')?h.slice(7):'';req.user=jwt.verify(t,JWT_SECRET);next()}catch(e){res.status(401).json({error:'Não autorizado'})}}
@@ -36,23 +59,6 @@ app.delete('/api/admin/delete-import',auth,roles('admin','gerente'),(req,res)=>{
 });
 app.get('/api/settings',auth,(req,res)=>{const get=k=>Number(db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value);res.json({payment_threshold:Number.isFinite(get('payment_threshold'))?get('payment_threshold'):90,cat_error_limit:Number.isFinite(get('cat_error_limit'))?get('cat_error_limit'):10,industry_error_limit:Number.isFinite(get('industry_error_limit'))?get('industry_error_limit'):6});});
 app.put('/api/settings',auth,roles('admin','gerente'),(req,res)=>{const n=Number(req.body.payment_threshold),cat=Number(req.body.cat_error_limit),ind=Number(req.body.industry_error_limit);if(!Number.isFinite(n)||n<0||!Number.isFinite(cat)||cat<0||!Number.isFinite(ind)||ind<0)return res.status(400).json({error:'Parâmetros inválidos'});const up=db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");up.run('payment_threshold',String(n));up.run('cat_error_limit',String(cat));up.run('industry_error_limit',String(ind));res.json({payment_threshold:n,cat_error_limit:cat,industry_error_limit:ind});});
-// MIGRACAO AUTOMATICA - CAT 1
-try{
-  const productionCols = db.prepare("PRAGMA table_info(production)").all().map(c=>c.name);
-
-  if(!productionCols.includes('cat1_sample1')){
-    db.exec("ALTER TABLE production ADD COLUMN cat1_sample1 REAL");
-    console.log('MIGRACAO: cat1_sample1 criada');
-  }
-
-  if(!productionCols.includes('cat1_sample2')){
-    db.exec("ALTER TABLE production ADD COLUMN cat1_sample2 REAL");
-    console.log('MIGRACAO: cat1_sample2 criada');
-  }
-}catch(e){
-  console.error('ERRO NA MIGRACAO CAT 1:',e);
-}
-
 if(!db.prepare("SELECT 1 FROM settings WHERE key='payment_threshold'").get()) db.prepare("INSERT INTO settings(key,value) VALUES('payment_threshold','90')").run();
 if(!db.prepare("SELECT 1 FROM settings WHERE key='cat_error_limit'").get()) db.prepare("INSERT INTO settings(key,value) VALUES('cat_error_limit','10')").run();
 if(!db.prepare("SELECT 1 FROM settings WHERE key='industry_error_limit'").get()) db.prepare("INSERT INTO settings(key,value) VALUES('industry_error_limit','6')").run();
